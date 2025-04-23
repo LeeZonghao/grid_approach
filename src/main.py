@@ -184,13 +184,13 @@ def L_B_cal(Points_in_box,k,L_B,G_2,D_2):
 
 #calculate diff and D_center
 @njit(parallel=True,fastmath=True)
-def cal_distance(m,r,B_short,D_center,diff,V,B):
+def cal_distance(m,r,C_short,D_center,diff,V,C):
     for i in prange(r):
-      diff_value=V[i,:] - B[i]
+      diff_value=V[i,:] - C[i]
       diff[1,i]=np.dot(diff_value,diff_value)
       if i<m:
-        for j in range(i,m):
-            center_value=B_short[i] - B_short[j]
+        for j in range(i+1,m):
+            center_value=C_short[i] - C_short[j]
             D_center[1, i, j] = np.dot(center_value,center_value)
             D_center[1, j, i] = np.dot(center_value,center_value)
     return diff,D_center
@@ -361,7 +361,69 @@ def D_2_cal(V,C_short,A,k,e,position_matrix,r):
               total += diff_sq**w
           D_2[y,w,i]=total
     return D_2
+@njit(parallel=True,fastmath=True)
+def D_1_cal(V,C_short,k,e,position_matrix,m):
+    D_1=np.zeros((2,k+1,m,m))
+    for i in prange(m-1):
+      select_box_i=np.where(position_matrix[i, :])[0]
+      for j in range(i+1,m):
+          select_box_j=np.where(position_matrix[j, :])[0]
+          diff_c = C_short[i, :] - C_short[j, :]
+          diff_c_sq = np.dot(diff_c, diff_c)
+          for y in range(2):
+            for w in range(k + 1):
+              total = 0.0
+              for i_idx in select_box_i:
+                for j_idx in select_box_j:
+                    if e[i_idx,j_idx]==y:
+                      diff = V[i_idx, :] - V[j_idx, :]
+                      diff_sq = np.dot(diff, diff)-diff_c_sq
+                      total += diff_sq**w
+              D_1[y,w,i,j]=total
+    return D_1
+@njit(parallel=True)
+def D_1_test(V,C,k,e,m,A,A_short,r):
+    D_1=np.zeros((2,k+1,m,m))
+    r=A.shape[0]
+    for i in prange(r-1):
+        for j in range(i+1,r):
+            # find box of point i
+            # find box of point j
+            select_box_i=np.where(A_short==A[i])[0]
+            select_box_j=np.where(A_short==A[j])[0]
+            # if two boxes are different, add the value to the moments
+            if select_box_i==select_box_j:
+                continue
+            elif select_box_i<select_box_j:
+                if e[i,j]==1:
+                    for s in range(k+1):
+                        D_1[1,s,select_box_i[0],select_box_j[0]]+=(np.linalg.norm(V[i,:]-V[j,:])**2-np.linalg.norm(C[i,:]-C[j,:])**2)**s
+                else:
+                    for s in range(k+1):
+                        D_1[0,s,select_box_i[0],select_box_j[0]]+=(np.linalg.norm(V[i,:]-V[j,:])**2-np.linalg.norm(C[i,:]-C[j,:])**2)**s
+            else:
+                if e[i,j]==1:
+                    for s in range(k+1):
+                        D_1[1,s,select_box_j[0],select_box_i[0]]+=(np.linalg.norm(V[i,:]-V[j,:])**2-np.linalg.norm(C[i,:]-C[j,:])**2)**s
+                else:
+                    for s in range(k+1):
+                        D_1[0,s,select_box_j[0],select_box_i[0]]+=(np.linalg.norm(V[i,:]-V[j,:])**2-np.linalg.norm(C[i,:]-C[j,:])**2)**s
+    return D_1
 
+@njit(parallel=True)
+def D_2_test(k,V,A,D_2,C,r):
+    D_2=np.zeros((2,k+1,r))
+    r=V.shape[0]
+    for i in prange(r):
+        #find all the points in the same box of i
+        j_positions = np.where(A == A[i])[0]
+        j_positions = j_positions[j_positions != i]
+        for j in j_positions:
+            for y in range(2):
+                if e[i,j]==y:
+                    for s in prange(k+1):
+                        D_2[y,s,i]+= (np.linalg.norm(V[i,:]-V[j,:])**2-np.linalg.norm(V[i,:]-C[i,:])**2)**s
+    return D_2
 
 @njit
 def multi_coeff(w, *args):
@@ -387,12 +449,14 @@ def multi_coeff(w, *args):
 
 @njit(parallel=True,fastmath=True)
 def sum_log_likelihood(L_BB,L_B):
-    L=0
+    L_1=0
     for i in prange(L_BB.shape[0]-1):
         for j in range(i,L_BB.shape[0]):
-            L+=L_BB[i,j]
+            L_1+=L_BB[i,j]
+    L_2=0
     for f in prange(L_B.shape[0]):
-        L+=0.5*L_B[f]
+        L_2+=0.5*L_B[f]
+    L=L_1+L_2
     return L
 @njit(parallel=True)
 def cal_center_box(V,A,A_short,counts,r):
@@ -490,7 +554,7 @@ def preprocessing(V, e, k, b, theta):
     L_BB = np.zeros((m, m))
     L_B = np.zeros(r)
     D_center = np.zeros((k + 1, m, m))
-    diff,D_center=cal_distance(m,r,B_short,D_center,diff,V,B)
+    diff,D_center=cal_distance(m,r,C_short,D_center,diff,V,C)
     # calculating the derivatives
     for i in Points_in_box:
         for s in range(k + 1):
@@ -517,19 +581,21 @@ def preprocessing(V, e, k, b, theta):
         M_4=cal_M_4(position_matrix, V, k, e, r,A,index_2)
         print("#### finish,M_4")
         D_2=D_2_cal(V,C_short,A,k,e,position_matrix,r)
+        D_test_2=D_2_test(k,V,A,D_2,C,r)
         print("#### finish,D_2")
+
         L_B=L_B_cal(Points_in_box,k,L_B,G_2,D_2)
         print("#### finish,L_B")
     D_1=D_1_cal(V,C_short,k,e,position_matrix,m)
     print("#### finish,D_1")
     L_BB=L_BB_cal(m,k,L_BB,G_1,D_1)
+   
     print("#### finish,L_BB")
     neighbor_matrix=k_near_neighbor(V,V.shape[0])
     print("#### finish neighbor_matrix")
     # L = np.sum(L_BB) + 0.5 * np.sum(L_B)
     L = sum_log_likelihood(L_BB,L_B)
-
-    return L_BB, L_B, L, M_1,M_2,M_3,M_4, D_1, D_2, G_1, G_2, D_center, diff, A, C_short,N,Points_in_box,counts,position_matrix,neighbor_matrix
+    return L_BB, L_B, L, M_1,M_2,M_3,M_4, D_1, D_2, G_1, G_2, D_center, diff, A,C, C_short,N,Points_in_box,counts,position_matrix,neighbor_matrix
 
 
 
@@ -982,7 +1048,7 @@ def propose_mix(vertex, box_center, b, alpha=0.75, batch_size=100):
                 return samples[i]
             
 
-def cal_posterior_prob(S,k,b,theta,e,T,L_BB, L_B, L, M_1,M_2,M_3,M_4, D_1, D_2, G_1, G_2, D_center, diff, A, C_short,N,Points_in_box,inv_factorial,binom_coeff,position_matrix,precomp_for_delta2,precomp_partitions_2,test_statistic,rank_matrix ):
+def cal_posterior_prob(S,k,b,theta,e,T,L_BB, L_B, L, M_1,M_2,M_3,M_4, D_1, D_2, G_1, G_2, D_center, diff, A, C_short,N,Points_in_box,inv_factorial,binom_coeff,position_matrix,precomp_for_delta2,precomp_partitions_2,test_statistic,rank_matrix,fctn ):
   """
   where i and j are node in V, q is order of taylor expansion, k is the required k-th closest, theta is parameter, b is side length of box, e is the adjacency matrix
   """
@@ -997,6 +1063,10 @@ def cal_posterior_prob(S,k,b,theta,e,T,L_BB, L_B, L, M_1,M_2,M_3,M_4, D_1, D_2, 
     # at start of each t, we set the update function to be zero matrix
     U_m_3=np.zeros((2*k+1,2*k+1,m))
     U_m_4=np.zeros((k+1,k+1,k+1,m))
+    D=np.zeros((r,r))
+    Log_like,D=actual_likelihood(V, e, theta,D,fctn)
+    L_true=np.sum(Log_like)
+    print("actual error are:" , np.abs(L_true-L))
     # np.save(os.path.join('/content/drive/My Drive/experiments_data',f'V_{t}.npy'), V)
     # np.save(os.path.join('/content/drive/My Drive/experiments_data', f'k_near_matrix_{t}.npy'), k_near_matrix)
     # np.save(os.path.join('/content/drive/My Drive/experiments_data', f'k_dist_matrix_{t}.npy'), k_dist_matrix)
@@ -1004,18 +1074,22 @@ def cal_posterior_prob(S,k,b,theta,e,T,L_BB, L_B, L, M_1,M_2,M_3,M_4, D_1, D_2, 
       i = int(i)  # Ensure `i` is an integer
       V_new = V.copy()
       i_box= A[i].item()
-      proposed_v = propose_mix(V_new[i, :], C_short[i], b)
+      proposed_v = propose_mix(V_new[i, :], C_short[i_box], b)
       func_h=cal_func_h(proposed_v,k)
       delta_1=delta_1_cal(i,proposed_v, V,k)
       delta_2=delta_2_optimized_fast(k, e, i, A, M_3, m, delta_1,precomp_for_delta2)
       print("### start update likelihood")
-      M_1_new, M_2_new, M_3_new, M_4_new, D_1_new, L_BB_new,D_2_new, diff_new, center_distance, C_short_new, G_1_new,G_2_new, L_B_new,L_new=update_likelihood_optimized(i,i_box,e,k,L,theta, A,N, M_1,M_2,M_4, L_BB, L_B, r, m, D_2, Points_in_box, C_short, V, delta_2, proposed_v, U_m_3, U_m_4, func_h, binom, inv_factorial,position_matrix,precomp_partitions_2)
+      M_1_new, M_2_new, M_3_new, M_4_new, D_1_new, L_BB_new,D_2_new, diff_new, center_distance, C_short_new, G_1_new,G_2_new, L_B_new,L_new=update_likelihood_optimized(i,i_box,e,k,L,theta, A,N, M_1,M_2,M_4, L_BB, L_B, r, m, D_2, Points_in_box, C_short, V, delta_2, proposed_v, U_m_3, U_m_4, func_h, binom_coeff, inv_factorial,position_matrix,precomp_partitions_2)
       alpha_1 = np.minimum(0, L_new - L)
-
+      log_up=Log_like.copy()
+      log_up,D=up_likelihood1(proposed_v, e, theta, i, log_up, D, fctn,V_new)
+      L_true_new=np.sum(log_up)
+      print("actual error are:" , np.abs(L_true_new-L_new))
       if np.log(np.random.rand()) < alpha_1:
           V_new[i, :] = proposed_v
           print("### start update moments")
           M_1, M_2, M_3, M_4, D_1, L_BB,D_2, diff, D_center, C_short, G_1,G_2, L_B,L= update_moments(i,i_box,k,m,M_1_new, M_2_new, M_3_new, M_4_new, D_1_new, L_BB_new,D_2_new, diff_new, center_distance, C_short_new, G_1_new,G_2_new, L_B_new,M_1, M_2, M_3, M_4, D_1, L_BB,D_2, diff, D_center, C_short, G_1,G_2, L_B,L_new,Points_in_box,position_matrix)
+          L_true,Log_like=L_true_new,log_up
     if (t>0)&((t/T)%0.25==0):
       print("has run ",25*(4*t/T),"percent")
       center=V.mean(axis=0)
@@ -1031,30 +1105,6 @@ def cal_posterior_prob(S,k,b,theta,e,T,L_BB, L_B, L, M_1,M_2,M_3,M_4, D_1, D_2, 
   return k_near_matrix,k_dist_matrix,test_statistic,V
 
 
-
-from scipy.sparse import csr_matrix
-from sknetwork.data import load_netset
-dataset = load_netset('openflights')
-adjacency = dataset.adjacency
-names = dataset.names
-
-e=adjacency.toarray()
-embedding=spectral_embed(e,2)
-n=embedding.shape[0]
-
-V=embedding.copy()
-k = 1
-theta = 0.5
-b=0.02
-#calculate Taylor expansion coeff
-inv_factorial, binom_coeff = precompute_utils(k)
-precomp_for_delta2 = precompute_partitions(k)
-precomp_partitions_2 = precompute_partitions_2(k)
-
-print("##### start proprecessing")
-L_BB, L_B, L, M_1,M_2,M_3,M_4, D_1, D_2, G_1, G_2, D_center, diff, A,C_short,N,Points_in_box,counts,position_matrix,neighbor_matrix=preprocessing(V, e, k, b, theta)
-test_statistic=np.zeros(neighbor_matrix.shape[0])  
-rank_matrix=np.zeros(neighbor_matrix.shape)
 
 
 @njit(parallel=True)
@@ -1102,23 +1152,29 @@ def average_rank(k_near_matrix, rank_matrix):
                     rank_matrix[i, j] += idx
     return rank_matrix
 
-k_near_matrix,k_dist_matrix,test_statistic,V=cal_posterior_prob(V,k,b,theta,e,20,L_BB, L_B, L, M_1,M_2,M_3,M_4, D_1, D_2, G_1, G_2, D_center, diff, A, C_short,N,Points_in_box,inv_factorial,binom_coeff,position_matrix,precomp_for_delta2,precomp_partitions_2,test_statistic,rank_matrix)
-i=np.random.randint(V.shape[0])
-r=V.shape[0]
-i_box=A[i].item()
-m=C_short.shape[0]
-# Pre-allocate these outside main loop
-U_m_3 = np.zeros((2*k+1, 2*k+1, m)) 
-U_m_4 = np.zeros((k+1, k+1, k+1, m))
-proposed_v = propose_mix(V[i, :], C_short[i_box], b)
-assert np.all(proposed_v >= C_short[i_box] - b/2)
-assert np.all(proposed_v <= C_short[i_box] + b/2)
-i_box= A[i].item()
-func_h=cal_func_h(proposed_v,k)
-delta_1=delta_1_cal(i,proposed_v, V,k)
-delta_2=delta_2_optimized_fast(k, e, i, A, M_3, m, delta_1,precomp_for_delta2)
-print("### start update likelihood")
-M_1_new, M_2_new, M_3_new, M_4_new, D_1_new, L_BB_new,D_2_new, diff_new, center_distance, C_short_new, G_1_new,G_2_new, L_B_new,L_new=update_likelihood_optimized(i,i_box,e,k,L,theta, A,N, M_1,M_2,M_4, L_BB, L_B, r, m, D_2, Points_in_box, C_short, V, delta_2, proposed_v, U_m_3, U_m_4, func_h, binom_coeff, inv_factorial,position_matrix,precomp_partitions_2)
-alpha_1 = np.minimum(0, L_new - L)
-# Should show smooth changes
-print(f"L: {L} -> L_new: {L_new}") 
+
+
+
+from scipy.sparse import csr_matrix
+from sknetwork.data import load_netset
+dataset = load_netset('openflights')
+adjacency = dataset.adjacency
+names = dataset.names
+
+e=adjacency.toarray()
+embedding=spectral_embed(e,2)
+n=embedding.shape[0]
+
+V=embedding.copy()
+k = 1
+theta = 0.5
+b=0.02
+#calculate Taylor expansion coeff
+inv_factorial, binom_coeff = precompute_utils(k)
+precomp_for_delta2 = precompute_partitions(k)
+precomp_partitions_2 = precompute_partitions_2(k)
+
+print("##### start proprecessing")
+L_BB, L_B, L, M_1,M_2,M_3,M_4, D_1, D_2, G_1, G_2, D_center, diff, A,C,C_short,N,Points_in_box,counts,position_matrix,neighbor_matrix=preprocessing(V, e, k, b, theta)
+test_statistic=np.zeros(neighbor_matrix.shape[0])  
+rank_matrix=np.zeros(neighbor_matrix.shape)

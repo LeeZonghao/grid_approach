@@ -3,7 +3,7 @@ __author__ = "Your Name <your.email@example.com>"
 __license__ = "MIT"
 
 # Package-level imports
-from .grid_approach import (
+from .grid_approach_test import (
     fast_factorial,
     Assign,
     generate_partitions,
